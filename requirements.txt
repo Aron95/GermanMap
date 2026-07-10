@@ -1,0 +1,6 @@
+dash==4.4.0
+dash_ag_grid==35.2.0
+pandas==3.0.3
+numpy==2.5.1
+plotly==6.8.0
+scikit-learn==1.9.0
