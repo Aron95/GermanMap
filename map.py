@@ -13,12 +13,21 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, mean_squared_error, r2_score
+from datetime import datetime
 
 # App initialisieren
 app = dash.Dash(__name__)
 
-# Datensatz laden
+# Datensatz laden (Stelle sicher, dass die Datei im selben Ordner liegt!)
 df = pd.read_csv('./wetter_zugverspaetungen_1200.csv')
+
+# Globale Variablen, um das Modell nach dem Trainieren zwischenzuspeichern
+trained_pipeline = None
+current_dependent_variable = None
+trained_features_list = []
+
+features = ['Start_Ort', 'End_Ort', 'Distanz_KM', 'Wetterlage', 'Verkehrsdichte', 'Abfahrt_Monat', 'Abfahrt_Stunde',
+            'Abfahrt_Wochentag', 'Ziel_Verspaetet', 'Verspaetung_Minuten']
 
 # App Layout definieren
 app.layout = [
@@ -28,6 +37,10 @@ app.layout = [
     dag.AgGrid(
         rowData=df.to_dict(orient='records'),
         columnDefs=[{"field": i} for i in df.columns],
+        dashGridOptions={
+            "enableCellTextSelection": True,
+            "ensureDomOrder": True,
+        },
         defaultColDef={"resizable": True, "sortable": True, "filter": True},
         style={"height": 400, "width": "100%", "marginBottom": "20px"}
     ),
@@ -36,11 +49,12 @@ app.layout = [
     html.Div([
         html.H1(children="Random Forest Einstellungen", style={'fontSize': '24px'}),
         html.P(
-            "Gib den Namen einer Spalte ein, die du vorhersagen möchtest (z.B. 'Wetterlage' für Klassifikation oder 'Distanz_KM' für Regression):"),
+            "Gib den Namen einer Spalte ein, die du vorhersagen möchtest (z.B. 'Verspaetung_Minuten' für deine Minutenschätzung):"),
 
         dcc.Input(
             id='user-input-dependent-variable',
             type='text',
+            value='Verspaetung_Minuten',  # Direkt vorausgefüllt für die Regression
             placeholder="Bitte gebe hier die abhängige Variable ein",
             style={'width': '300px', 'padding': '8px', 'marginRight': '10px'}
         ),
@@ -49,16 +63,135 @@ app.layout = [
 
     html.Br(),
 
-    # Lade-Animation (Spinner) zeigt sich, während das Modell rechnet
+    # Lade-Animation für das Training
     dcc.Loading(
         id="loading-output",
         type="circle",
         children=html.Div(id='output-container', style={'fontWeight': 'bold', 'marginTop': '10px'})
-    )
+    ),
+
+    html.Br(),
+    html.Hr(),
+    html.Br(),
+
+    html.Div([
+        html.H2("Live-Vorhersage für eine Zugfahrt"),
+        html.P("Hinweis: Trainiere zuerst oben das Modell mit 'Verspaetung_Minuten', um hier die Minuten zu schätzen."),
+
+        html.Div([
+            html.Label("Start Ort:"),
+            dcc.Input(id='Start-Ort-variable', type='text', value='Berlin', placeholder="z.B. Berlin"),
+
+            html.Label("End Ort:", style={'marginLeft': '20px'}),
+            dcc.Input(id='End-Ort-variable', type='text', value='München', placeholder="z.B. München"),
+
+            html.Label("Distanz (KM):", style={'marginLeft': '20px'}),
+            dcc.Input(id='Distanz-KM-variable', type='number', value=500, placeholder="z.B. 500"),
+        ], style={'marginBottom': '15px'}),
+
+        html.Div([
+            html.Label("Wetterlage:"),
+            dcc.Input(id='Wetterlage-variable', type='text', value='Schnee',
+                      placeholder="z.B. Regnerisch, Schnee, Klar"),
+
+            html.Label("Verkehrsdichte:", style={'marginLeft': '20px'}),
+            dcc.Input(id='Verkehrsdichte-variable', type='text', value='Hoch',
+                      placeholder="z.B. Niedrig, Normal, Hoch"),
+
+            html.Label("Abfahrtsdatum:", style={'marginLeft': '20px'}),
+            dcc.DatePickerSingle(
+                id='Datum-picker-variable',
+                min_date_allowed=datetime(2020, 1, 1),
+                max_date_allowed=datetime(2030, 12, 31),
+                date=datetime(2026, 7, 12)
+            ),
+
+            html.Label("Uhrzeit (Stunde 0-23):", style={'marginLeft': '20px'}),
+            dcc.Input(id='Abfahrt-Stunde-variable', type='number', value=14, min=0, max=23, style={'width': '60px'}),
+        ], style={'marginBottom': '20px'}),
+
+        html.Button('Zugverspätung schätzen', id='predict-button', n_clicks=0,
+                    style={'padding': '10px 20px', 'backgroundColor': '#2ca02c', 'color': 'white', 'border': 'none',
+                           'borderRadius': '4px', 'cursor': 'pointer', 'fontSize': '16px'}),
+
+    ], style={'backgroundColor': '#eef2f7', 'padding': '20px', 'borderRadius': '5px'}),
+
+    # Lade-Animation für die Vorhersage
+    dcc.Loading(
+        id="loading-output-prediction",
+        type="circle",
+        children=html.Div(id='output-prediction-container', style={'marginTop': '15px'})
+    ),
 ]
 
 
-# --- DASH CALLBACK ---
+# --- CALLBACK FÜR PROGNOSE (REAGIERT NUR AUF BUTTON-KLICK) ---
+@app.callback(
+    Output('output-prediction-container', 'children'),
+    Input('predict-button', 'n_clicks'),  # Löst den Callback aus
+    State('Start-Ort-variable', 'value'),  # Werte werden nur als State übergeben
+    State('End-Ort-variable', 'value'),
+    State('Distanz-KM-variable', 'value'),
+    State('Wetterlage-variable', 'value'),
+    State('Verkehrsdichte-variable', 'value'),
+    State('Datum-picker-variable', 'date'),
+    State('Abfahrt-Stunde-variable', 'value'),
+    prevent_initial_call=True
+)
+def predict_current_ride(n_clicks, start, ende, distanz, wetter, verkehr, datum_str, stunde):
+    global trained_pipeline, current_dependent_variable, trained_features_list
+
+    # Sicherstellen, dass der Button geklickt wurde und ein Modell da ist
+    if n_clicks == 0 or trained_pipeline is None:
+        return html.Div("⚠️ Bitte trainiere zuerst oben das Modell, bevor du eine Schätzung startest.",
+                        style={'color': 'orange', 'fontWeight': 'bold'})
+
+    # Prüfen, ob das Modell für Minuten trainiert wurde
+    if current_dependent_variable != 'Verspaetung_Minuten':
+        return html.Div(
+            f"⚠️ Das Modell ist aktuell auf '{current_dependent_variable}' trainiert. Bitte trainiere das Modell oben neu mit 'Verspaetung_Minuten'.",
+            style={'color': 'red', 'fontWeight': 'bold'})
+
+    try:
+        # Features aus dem Datum ziehen
+        datum_obj = pd.to_datetime(datum_str)
+        monat = datum_obj.month
+        wochentag = datum_obj.dayofweek
+
+        # DataFrame für Scikit-Learn erstellen
+        input_data = pd.DataFrame([{
+            'Start_Ort': str(start),
+            'End_Ort': str(ende),
+            'Distanz_KM': float(distanz) if distanz is not None else 0.0,
+            'Wetterlage': str(wetter),
+            'Verkehrsdichte': str(verkehr),
+            'Abfahrt_Monat': int(monat),
+            'Abfahrt_Stunde': int(stunde) if stunde is not None else 12,
+            'Abfahrt_Wochentag': int(wochentag),
+            'Ziel_Verspaetet': 0  # Dummy-Wert
+        }])
+
+        # Features auf die Trainings-Spalten reduzieren
+        input_data_filtered = input_data[trained_features_list]
+
+        # Vorhersage berechnen
+        prediction = trained_pipeline.predict(input_data_filtered)[0]
+        prediction = max(0.0, prediction)  # Keine negative Verspätung zulassen
+
+        return html.Div([
+            html.H3("Ergebnis der Live-Schätzung:"),
+            html.Div(f"Voraussichtliche Verspätung: {prediction:.1f} Minuten",
+                     style={'fontSize': '22px', 'color': '#2ca02c', 'fontWeight': 'bold'}),
+            html.P(f"Berechnet für die Strecke {start} ➔ {ende} bei '{wetter}' und '{verkehr}' Verkehr.",
+                   style={'color': 'gray', 'fontSize': '13px', 'marginTop': '5px'})
+        ], style={'padding': '15px', 'borderLeft': '5px solid #2ca02c', 'backgroundColor': '#f2fcf2',
+                  'borderRadius': '4px'})
+
+    except Exception as e:
+        return html.Div(f"❌ Fehler bei der Vorhersage: {str(e)}", style={'color': 'red'})
+
+
+# --- DASH CALLBACK FÜR TRAINING ---
 @app.callback(
     Output('output-container', 'children'),
     Input('submit-button', 'n_clicks'),
@@ -66,23 +199,30 @@ app.layout = [
     prevent_initial_call=True
 )
 def configurate_random_forest(n_clicks, text_value):
-    if not text_value:
-        return html.P("Bitte gib eine gültige Variable aus dem Datensatz ein!", style={'color': 'orange'})
+    global trained_pipeline, current_dependent_variable, trained_features_list
+
+    if not text_value or text_value not in features:
+        return html.P(f"Bitte gib eine gültige Variable ein! Mögliche Werte: {', '.join(features)}",
+                      style={'color': 'orange'})
 
     try:
-        # Startet das Training und holt die fertigen Layout-Elemente/Diagramme ab
-        visualisierung = train_random_forest(dependent_variable=text_value)
+        visualisierung, model_pipeline, used_features = train_random_forest_and_return_model(
+            dependent_variable=text_value)
+
+        trained_pipeline = model_pipeline
+        current_dependent_variable = text_value
+        trained_features_list = used_features
+
         return html.Div([
             html.P(f"✓ Modell erfolgreich trainiert für Zielvariable: '{text_value}' (Durchlauf #{n_clicks})",
                    style={'color': 'green', 'fontSize': '16px'}),
             visualisierung
         ])
     except ValueError as e:
-        # Fängt falsche Eingaben ab und zeigt sie im Browser an
         return html.P(f"❌ Fehler: {str(e)}", style={'color': 'red'})
 
 
-# --- HILFSFUNKTIONEN FÜR MACHINE LEARNING ---
+# --- TRAINING LOGIK ---
 
 def configure_features(features: list[str], dependent_variable: str) -> tuple[list[str], str]:
     features_without_dependent_variable: list[str] = features.copy()
@@ -90,7 +230,7 @@ def configure_features(features: list[str], dependent_variable: str) -> tuple[li
         features_without_dependent_variable.remove(dependent_variable)
         return features_without_dependent_variable, dependent_variable
     except ValueError:
-        raise ValueError(f"Feature '{dependent_variable}' ist nicht in der vordefinierten Feature-Liste vorhanden.")
+        raise ValueError(f"Feature '{dependent_variable}' ist nicht vorhanden.")
 
 
 def regression_training(preprocessor: ColumnTransformer, y_reg, X) -> tuple:
@@ -113,121 +253,76 @@ def classification_training(preprocessor: ColumnTransformer, y_clf, X) -> tuple:
     return clf_pipeline, X_train_c, X_test_c, y_train_c, y_test_c
 
 
-def train_random_forest(dependent_variable: str):
-    # Datensatz frisch einlesen
+def train_random_forest_and_return_model(dependent_variable: str):
     df_ml = pd.read_csv('./wetter_zugverspaetungen_1200.csv')
 
-    # Feature Engineering aus dem Datum extrahieren
-    df_ml['Geplante_Abfahrt'] = pd.to_datetime(df_ml['Geplante_Abfahrt'])
-    df_ml['Abfahrt_Monat'] = df_ml['Geplante_Abfahrt'].dt.month
-    df_ml['Abfahrt_Stunde'] = df_ml['Geplante_Abfahrt'].dt.hour
-    df_ml['Abfahrt_Wochentag'] = df_ml['Geplante_Abfahrt'].dt.dayofweek
+    if 'Geplante_Abfahrt' in df_ml.columns:
+        df_ml['Geplante_Abfahrt'] = pd.to_datetime(df_ml['Geplante_Abfahrt'])
+        df_ml['Abfahrt_Monat'] = df_ml['Geplante_Abfahrt'].dt.month
+        df_ml['Abfahrt_Stunde'] = df_ml['Geplante_Abfahrt'].dt.hour
+        df_ml['Abfahrt_Wochentag'] = df_ml['Geplante_Abfahrt'].dt.dayofweek
 
-    # Definition aller potenziellen Features im verarbeiteten Datensatz
-    features = ['Start_Ort', 'End_Ort', 'Distanz_KM', 'Wetterlage', 'Verkehrsdichte', 'Abfahrt_Monat', 'Abfahrt_Stunde',
-                'Abfahrt_Wochentag','Ziel_Verspaetet','Verspaetung_Minuten']
     cat_features = ['Start_Ort', 'End_Ort', 'Wetterlage', 'Verkehrsdichte', 'Ziel_Verspaetet']
-    num_features = ['Distanz_KM', 'Abfahrt_Monat', 'Abfahrt_Stunde', 'Abfahrt_Wochentag','Verspaetung_Minuten']
+    num_features = ['Distanz_KM', 'Abfahrt_Monat', 'Abfahrt_Stunde', 'Abfahrt_Wochentag', 'Verspaetung_Minuten']
 
-    # Zielvariable aus den Eingabe-Features entfernen, damit das Modell nicht schummelt
     if dependent_variable in cat_features:
         cat_features.remove(dependent_variable)
     elif dependent_variable in num_features:
         num_features.remove(dependent_variable)
-    else:
-        raise ValueError(
-            f"Zielvariable '{dependent_variable}' existiert nicht in den Features oder kann nicht verwendet werden.")
 
-    # X-Matrix vorbereiten
     features_without_dependent_variable, dependent_variable = configure_features(features, dependent_variable)
     X = df_ml[features_without_dependent_variable]
 
-    # Präprozessor für One-Hot-Encoding aufbauen
     preprocessor = ColumnTransformer(
         transformers=[
             ('cat', OneHotEncoder(drop='first', handle_unknown='ignore', sparse_output=False), cat_features),
             ('num', 'passthrough', num_features)
         ])
 
-    # --- FALL 1: KLASSIFIKATION (Kategoriale Zielvariable) ---
-    if dependent_variable in ['Start_Ort', 'End_Ort', 'Wetterlage', 'Verkehrsdichte']:
+    # --- FALL 1: KLASSIFIKATION ---
+    if dependent_variable in ['Start_Ort', 'End_Ort', 'Wetterlage', 'Verkehrsdichte', 'Ziel_Verspaetet']:
         y_clf = df_ml[dependent_variable]
-        clf_tuple = classification_training(preprocessor=preprocessor, y_clf=y_clf, X=X)
-        pipeline, X_train, X_test, y_train, y_test = clf_tuple
+        pipeline, X_train, X_test, y_train, y_test = classification_training(preprocessor, y_clf, X)
 
-        # Feature-Wichtigkeiten extrahieren
-        ohe_cols = pipeline.named_steps['preprocessor'].named_transformers_['cat'].get_feature_names_out(cat_features)
-        all_features = list(ohe_cols) + num_features
-        importances = pipeline.named_steps['classifier'].feature_importances_
+        feature_imp_df = pd.DataFrame({
+            'Feature': list(pipeline.named_steps['preprocessor'].named_transformers_['cat'].get_feature_names_out(
+                cat_features)) + num_features,
+            'Wichtigkeit': pipeline.named_steps['classifier'].feature_importances_
+        }).sort_values(by='Wichtigkeit').tail(10)
 
-        feature_imp_df = pd.DataFrame({'Feature': all_features, 'Wichtigkeit': importances})
-        feature_imp_df = feature_imp_df.sort_values(by='Wichtigkeit', ascending=True).tail(10)  # Top 10
+        fig = px.bar(feature_imp_df, x='Wichtigkeit', y='Feature', orientation='h',
+                     title='Top 10 Feature Importances (Klassifikation)', template='plotly_white')
+        return dcc.Graph(figure=fig), pipeline, list(X.columns)
 
-        # HTML Balkendiagramm erzeugen (Blau für Klassifikation)
-        fig = px.bar(
-            feature_imp_df,
-            x='Wichtigkeit',
-            y='Feature',
-            orientation='h',
-            title='Top 10 Feature Importances (Welche Variable erklärt die Klassifikation am besten?)',
-            template='plotly_white'
-        )
-        fig.update_layout(height=400, margin=dict(l=0, r=0, t=40, b=0))
-        return dcc.Graph(figure=fig)
-
-    # --- FALL 2: REGRESSION (Numerische Zielvariable) ---
+    # --- FALL 2: REGRESSION ---
     else:
         y_reg = df_ml[dependent_variable]
-        reg_tuple = regression_training(preprocessor=preprocessor, y_reg=y_reg, X=X)
-        pipeline, X_train, X_test, y_train, y_test = reg_tuple
+        pipeline, X_train, X_test, y_train, y_test = regression_training(preprocessor, y_reg, X)
 
-        # 1. Metriken berechnen
         preds = pipeline.predict(X_test)
         r2 = r2_score(y_test, preds)
         rmse = np.sqrt(mean_squared_error(y_test, preds))
 
-        # HTML Tabelle für Regressionsmetriken erzeugen
         fig_table = go.Figure(data=[go.Table(
-            header=dict(values=['Metrik / Kennzahl', 'Errechneter Wert für Testdaten'],
-                        fill_color='#1f77b4',
-                        align='left',
-                        font=dict(color='white', size=14)),
-            cells=dict(values=[['R² Score (Erklärte Varianz)', 'RMSE (Durchschnittlicher Abweichungsfehler)'],
-                               [f"{r2:.4f}", f"{rmse:.2f}"]],
-                       fill_color='#f5f6f9',
-                       align='left',
-                       font=dict(size=12))
+            header=dict(values=['Metrik / Kennzahl', 'Wert'], fill_color='#1f77b4', font=dict(color='white')),
+            cells=dict(values=[['R² Score', 'RMSE (Fehler in Min.)'], [f"{r2:.4f}", f"{rmse:.2f}"]],
+                       fill_color='#f5f6f9')
         )])
-        fig_table.update_layout(title='Modell-Performance (Regression)', margin=dict(l=0, r=0, t=40, b=10), height=180)
+        fig_table.update_layout(title='Modell-Performance (Regression)', height=180, margin=dict(l=0, r=0, t=40, b=10))
 
-        # 2. Feature-Wichtigkeiten für die Regression extrahieren
-        ohe_cols = pipeline.named_steps['preprocessor'].named_transformers_['cat'].get_feature_names_out(cat_features)
-        all_features = list(ohe_cols) + num_features
-        importances = pipeline.named_steps['regressor'].feature_importances_
+        feature_imp_df = pd.DataFrame({
+            'Feature': list(pipeline.named_steps['preprocessor'].named_transformers_['cat'].get_feature_names_out(
+                cat_features)) + num_features,
+            'Wichtigkeit': pipeline.named_steps['regressor'].feature_importances_
+        }).sort_values(by='Wichtigkeit').tail(10)
 
-        feature_imp_df = pd.DataFrame({'Feature': all_features, 'Wichtigkeit': importances})
-        feature_imp_df = feature_imp_df.sort_values(by='Wichtigkeit', ascending=True).tail(10)  # Top 10
-
-        # HTML Balkendiagramm für Regression erzeugen (Grün zur optischen Unterscheidung)
-        fig_bar = px.bar(
-            feature_imp_df,
-            x='Wichtigkeit',
-            y='Feature',
-            orientation='h',
-            title='Top 10 Feature Importances (Welche Variable erklärt die Regressions-Zielvariable am besten?)',
-            template='plotly_white',
-            color_discrete_sequence=['#2ca02c']
-        )
+        fig_bar = px.bar(feature_imp_df, x='Wichtigkeit', y='Feature', orientation='h',
+                         title='Top 10 Feature Importances (Regression)', template='plotly_white',
+                         color_discrete_sequence=['#2ca02c'])
         fig_bar.update_layout(height=350, margin=dict(l=0, r=0, t=40, b=0))
 
-        # Kombiniere beide Diagramme (Tabelle + Balkendiagramm) in einer Div
-        return html.Div([
-            dcc.Graph(figure=fig_table),
-            html.Br(),
-            dcc.Graph(figure=fig_bar)
-        ])
+        return html.Div([dcc.Graph(figure=fig_table), html.Br(), dcc.Graph(figure=fig_bar)]), pipeline, list(X.columns)
 
 
 if __name__ == '__main__':
-    # Server starten
-    app.run(debug=True)
+    app.run(debug=True, port=8051)
