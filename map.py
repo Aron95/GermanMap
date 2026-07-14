@@ -1,4 +1,3 @@
-from typing import Any
 import dash
 from dash import html, dcc
 from dash.dependencies import Input, Output, State
@@ -12,8 +11,9 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import classification_report, mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score
 from datetime import datetime
+
 
 # App initialisieren
 app = dash.Dash(__name__)
@@ -29,100 +29,228 @@ trained_features_list = []
 features = ['Start_Ort', 'End_Ort', 'Distanz_KM', 'Wetterlage', 'Verkehrsdichte', 'Abfahrt_Monat', 'Abfahrt_Stunde',
             'Abfahrt_Wochentag', 'Ziel_Verspaetet', 'Verspaetung_Minuten']
 
+
+df['Ziel_Verspaetet'] = df['Ziel_Verspaetet'].fillna(False)
+df['Verspaetung_Minuten'] = df['Verspaetung_Minuten'].fillna(0).astype(int)
+
+df['Ziel_Verspaetet'] = df['Ziel_Verspaetet'].astype(str).str.lower().map({
+    'true': True, '1': True, '1.0': True,
+    'false': False, '0': False, '0.0': False
+}).fillna(False)
+
+df_wetter = (
+    df.groupby(["Wetterlage", "Ziel_Verspaetet"])["Verspaetung_Minuten"]
+    .sum()
+    .reset_index()
+)
+
+df_verkehr = (
+    df.groupby(["Verkehrsdichte", "Ziel_Verspaetet"])["Verspaetung_Minuten"]
+    .sum()
+    .reset_index()
+)
+
+for data_frame in [df_wetter, df_verkehr]:
+    data_frame["Ziel_Verspaetet"] = data_frame["Ziel_Verspaetet"].map(
+        {True: "Verspätet", False: "Pünktlich"}
+    )
+# Diagramm 1: Wetterlage
+fig_wetter = px.bar(
+    df_wetter,
+    x="Wetterlage",
+    y="Verspaetung_Minuten",
+    color="Ziel_Verspaetet",
+    title="Gesamte Verspätungsminuten nach Wetterlage",
+    labels={
+        "Verspaetung_Minuten": "Summe der Verspätungsminuten",
+        "Ziel_Verspaetet": "Status",
+    },
+    color_discrete_map={"Verspätet": "#d62728", "Pünktlich": "#2ca02c"},
+    template="plotly_white",
+)
+
+# Diagramm 2: Verkehrsdichte
+fig_verkehr = px.bar(
+    df_verkehr,
+    x="Verkehrsdichte",
+    y="Verspaetung_Minuten",
+    color="Ziel_Verspaetet",
+    title="Gesamte Verspätungsminuten nach Verkehrsdichte",
+    labels={
+        "Verspaetung_Minuten": "Summe der Verspätungsminuten",
+        "Ziel_Verspaetet": "Status",
+    },
+    color_discrete_map={"Verspätet": "#d62728", "Pünktlich": "#2ca02c"},
+    template="plotly_white",
+    # Sortiert die X-Achse logisch statt alphabetisch
+    category_orders={"Verkehrsdichte": ["Niedrig", "Normal", "Hoch"]},
+)
+
+for fig in [fig_wetter, fig_verkehr]:
+    fig.update_layout(
+        font_family="Arial, sans-serif",
+        title_font_size=18,
+        title_x=0.0,
+        margin=dict(l=40, r=20, t=60, b=40),
+        hovermode="x",
+    )
+    fig.update_yaxes(showgrid=True, gridcolor="#f0f0f0")
+    fig.update_xaxes(showgrid=False)
+
 # App Layout definieren
 app.layout = [
     html.Div(children="Geladener Datensatz", style={'fontSize': '18px', 'marginBottom': '10px'}),
 
-    # AG Grid Tabelle zur interaktiven Ansicht der Daten
-    dag.AgGrid(
-        rowData=df.to_dict(orient='records'),
-        columnDefs=[{"field": i} for i in df.columns],
-        dashGridOptions={
-            "enableCellTextSelection": True,
-            "ensureDomOrder": True,
-        },
-        defaultColDef={"resizable": True, "sortable": True, "filter": True},
-        style={"height": 400, "width": "100%", "marginBottom": "20px"}
+    html.Button(id='show-data-button', n_clicks=0, children='Datensatz zeigen'),
+
+    html.Div(
+        id="show-data-output",
     ),
 
-    # Eingabebereich für das Modell
-    html.Div([
-        html.H1(children="Random Forest Einstellungen", style={'fontSize': '24px'}),
-        html.P(
-            "Gib den Namen einer Spalte ein, die du vorhersagen möchtest (z.B. 'Verspaetung_Minuten' für deine Minutenschätzung):"),
 
-        dcc.Input(
-            id='user-input-dependent-variable',
-            type='text',
-            value='Verspaetung_Minuten',  # Direkt vorausgefüllt für die Regression
-            placeholder="Bitte gebe hier die abhängige Variable ein",
-            style={'width': '300px', 'padding': '8px', 'marginRight': '10px'}
-        ),
-        html.Button('Modell trainieren', id='submit-button', n_clicks=0, style={'padding': '8px 15px'})
-    ], style={'backgroundColor': '#f9f9f9', 'padding': '20px', 'borderRadius': '5px'}),
+    dcc.Tabs(id='core-tabs', children=[
+        dcc.Tab(label='Deskriptive Diagrame', children=[
+            html.Div(
+                [
+                    html.H2(
+                        "Verspätungs-Analyse nach Einflussfaktoren",
+                        style={"fontFamily": "sans-serif", "marginBottom": "20px"},
+                    ),
+                    # Flexbox-Container, um beide Diagramme nebeneinander anzuzeigen
+                    html.Div(
+                        [
+                            # Box 1: Wetter
+                            html.Div(
+                                [
+                                    dcc.Graph(
+                                        id="wetter-chart",
+                                        figure=fig_wetter,
+                                        config={"displayModeBar": False},
+                                    )],
+                                style={
+                                    "flex": "1",
+                                    "backgroundColor": "white",
+                                    "padding": "15px",
+                                    "borderRadius": "8px",
+                                    "boxShadow": "0px 4px 12px rgba(0, 0, 0, 0.05)",
+                                    "marginRight": "15px",
+                                },),
+                            # Box 2: Verkehr
+                            html.Div(
+                                [
+                                    dcc.Graph(
+                                        id="verkehr-chart",
+                                        figure=fig_verkehr,
+                                        config={"displayModeBar": False},
+                                    )
+                                ],
+                                style={
+                                    "flex": "1",
+                                    "backgroundColor": "white",
+                                    "padding": "15px",
+                                    "borderRadius": "8px",
+                                    "boxShadow": "0px 4px 12px rgba(0, 0, 0, 0.05)",
+                                },
+                            ),],
+                        style={"display": "flex", "flexDirection": "row"},
+                    ),],
+                style={"backgroundColor": "#f4f6f9", "padding": "30px"},
+            )
+        ]),
 
-    html.Br(),
+        dcc.Tab(label="Modell-Einstellungen", children=[html.Div([
+            html.H1(children="Random Forest Einstellungen", style={'fontSize': '24px'}),
+            html.P(
+                "Gib den Namen einer Spalte ein, die du vorhersagen möchtest (z.B. 'Verspaetung_Minuten' für deine Minutenschätzung):"),
 
-    # Lade-Animation für das Training
-    dcc.Loading(
-        id="loading-output",
-        type="circle",
-        children=html.Div(id='output-container', style={'fontWeight': 'bold', 'marginTop': '10px'})
-    ),
-
-    html.Br(),
-    html.Hr(),
-    html.Br(),
-
-    html.Div([
-        html.H2("Live-Vorhersage für eine Zugfahrt"),
-        html.P("Hinweis: Trainiere zuerst oben das Modell mit 'Verspaetung_Minuten', um hier die Minuten zu schätzen."),
-
-        html.Div([
-            html.Label("Start Ort:"),
-            dcc.Input(id='Start-Ort-variable', type='text', value='Berlin', placeholder="z.B. Berlin"),
-
-            html.Label("End Ort:", style={'marginLeft': '20px'}),
-            dcc.Input(id='End-Ort-variable', type='text', value='München', placeholder="z.B. München"),
-
-            html.Label("Distanz (KM):", style={'marginLeft': '20px'}),
-            dcc.Input(id='Distanz-KM-variable', type='number', value=500, placeholder="z.B. 500"),
-        ], style={'marginBottom': '15px'}),
-
-        html.Div([
-            html.Label("Wetterlage:"),
-            dcc.Input(id='Wetterlage-variable', type='text', value='Schnee',
-                      placeholder="z.B. Regnerisch, Schnee, Klar"),
-
-            html.Label("Verkehrsdichte:", style={'marginLeft': '20px'}),
-            dcc.Input(id='Verkehrsdichte-variable', type='text', value='Hoch',
-                      placeholder="z.B. Niedrig, Normal, Hoch"),
-
-            html.Label("Abfahrtsdatum:", style={'marginLeft': '20px'}),
-            dcc.DatePickerSingle(
-                id='Datum-picker-variable',
-                min_date_allowed=datetime(2020, 1, 1),
-                max_date_allowed=datetime(2030, 12, 31),
-                date=datetime(2026, 7, 12)
+            dcc.Input(
+                id='user-input-dependent-variable',
+                type='text',
+                value='Verspaetung_Minuten',  # Direkt vorausgefüllt für die Regression
+                placeholder="Bitte gebe hier die abhängige Variable ein",
+                style={'width': '300px', 'padding': '8px', 'marginRight': '10px'}
             ),
+            html.Button('Modell trainieren', id='submit-button', n_clicks=0, style={'padding': '8px 15px'}),
+            dcc.Loading(
+                id="loading-output",
+                type="circle",
+                children=html.Div(id='output-container', style={'fontWeight': 'bold', 'marginTop': '10px'})
+            ),
+        ], style={'backgroundColor': '#f9f9f9', 'padding': '20px', 'borderRadius': '5px'})]),
+        dcc.Tab(label="Prediktion", children=[ html.Div([
+                html.H2("Live-Vorhersage für eine Zugfahrt"),
+                html.P("Hinweis: Trainiere zuerst oben das Modell mit 'Verspaetung_Minuten', um hier die Minuten zu schätzen."),
 
-            html.Label("Uhrzeit (Stunde 0-23):", style={'marginLeft': '20px'}),
-            dcc.Input(id='Abfahrt-Stunde-variable', type='number', value=14, min=0, max=23, style={'width': '60px'}),
-        ], style={'marginBottom': '20px'}),
+                html.Div([
+                    html.Label("Start Ort:"),
+                    dcc.Input(id='Start-Ort-variable', type='text', value='Berlin', placeholder="z.B. Berlin"),
 
-        html.Button('Zugverspätung schätzen', id='predict-button', n_clicks=0,
-                    style={'padding': '10px 20px', 'backgroundColor': '#2ca02c', 'color': 'white', 'border': 'none',
-                           'borderRadius': '4px', 'cursor': 'pointer', 'fontSize': '16px'}),
+                    html.Label("End Ort:", style={'marginLeft': '20px'}),
+                    dcc.Input(id='End-Ort-variable', type='text', value='München', placeholder="z.B. München"),
 
-    ], style={'backgroundColor': '#eef2f7', 'padding': '20px', 'borderRadius': '5px'}),
+                    html.Label("Distanz (KM):", style={'marginLeft': '20px'}),
+                    dcc.Input(id='Distanz-KM-variable', type='number', value=500, placeholder="z.B. 500"),
+                ], style={'marginBottom': '15px'}),
 
-    # Lade-Animation für die Vorhersage
-    dcc.Loading(
-        id="loading-output-prediction",
-        type="circle",
-        children=html.Div(id='output-prediction-container', style={'marginTop': '15px'})
-    ),
+
+                html.Div([
+                    html.Label("Wetterlage:"),
+                    dcc.Input(id='Wetterlage-variable', type='text', value='Schnee',
+                              placeholder="z.B. Regnerisch, Schnee, Klar"),
+
+                    html.Label("Verkehrsdichte:", style={'marginLeft': '20px'}),
+                    dcc.Input(id='Verkehrsdichte-variable', type='text', value='Hoch',
+                              placeholder="z.B. Niedrig, Normal, Hoch"),
+
+                    html.Label("Abfahrtsdatum:", style={'marginLeft': '20px'}),
+                    dcc.DatePickerSingle(
+                        id='Datum-picker-variable',
+                        min_date_allowed=datetime(2020, 1, 1),
+                        max_date_allowed=datetime(2030, 12, 31),
+                        date=datetime(2026, 7, 12)
+                    ),
+
+                    html.Label("Uhrzeit (Stunde 0-23):", style={'marginLeft': '20px'}),
+                    dcc.Input(id='Abfahrt-Stunde-variable', type='number', value=14, min=0, max=23, style={'width': '60px'}),
+                ], style={'marginBottom': '20px'}),
+
+                html.Button('Zugverspätung schätzen', id='predict-button', n_clicks=0,
+                            style={'padding': '10px 20px', 'backgroundColor': '#2ca02c', 'color': 'white', 'border': 'none',
+                                   'borderRadius': '4px', 'cursor': 'pointer', 'fontSize': '16px'}),
+                dcc.Loading(
+                    id="loading-output-prediction",
+                    type="circle",
+                    children=html.Div(id='output-prediction-container', style={'marginTop': '15px'})
+                ),
+
+        ], style={'backgroundColor': '#eef2f7', 'padding': '20px', 'borderRadius': '5px'}),
+      ])
+
+
+
+])
 ]
+
+@app.callback(
+    Output('show-data-output', 'children'),
+    Input('show-data-button', 'n_clicks'),
+)
+def show_data(n_clicks):
+    if n_clicks % 2 == 0:
+        return html.Div([
+            html.Hr(),
+        ])
+    else:
+        return dag.AgGrid(
+            rowData=df.to_dict(orient='records'),
+            columnDefs=[{"field": i} for i in df.columns],
+            dashGridOptions={
+                "enableCellTextSelection": True,
+                "ensureDomOrder": True,
+            },
+            defaultColDef={"resizable": True, "sortable": True, "filter": True},
+            style={"height": 400, "width": "100%", "marginBottom": "20px"}
+        ),
 
 
 # --- CALLBACK FÜR PROGNOSE (REAGIERT NUR AUF BUTTON-KLICK) ---
