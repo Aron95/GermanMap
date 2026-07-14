@@ -8,11 +8,13 @@ interaktiven Tabelle an und trainiert auf Wunsch ein **Random-Forest**-Modell
 ## Features
 
 - Interaktive Datentabelle (sortier- und filterbar) via `dash-ag-grid`
+- Kleinere Deskriptive Statistik. 
 - Random-Forest-Training für eine beliebige Spalte des Datensatzes
   - **Klassifikation** bei kategorialen Zielvariablen (z. B. `Wetterlage`)
   - **Regression** bei numerischen Zielvariablen (z. B. `Distanz_KM`)
 - Automatisches Feature-Engineering aus dem Abfahrtsdatum (Monat, Stunde, Wochentag)
 - Visualisierung der Top-10-Feature-Importances und Regressionsmetriken (R², RMSE)
+- Schätzung von Verspätung auf trainierten Random Forest Modell
 
 ## Installation
 
@@ -28,7 +30,7 @@ pip install -r requirements.txt
 python map.py
 ```
 
-Anschließend das Dashboard im Browser unter http://127.0.0.1:8050 öffnen.
+Anschließend das Dashboard im Browser unter http://127.0.0.1:8051 öffnen.
 Eine Zielvariable (Spaltenname) eingeben und **Modell trainieren** klicken.
 
 ## Daten
